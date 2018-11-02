@@ -1,0 +1,149 @@
+# Balanced treatment, 20-dimensional, simple linear CATE
+
+set.seed(1)
+
+# MSE function
+testMSE <- function(eX, d, n.sample, n.test){
+  
+  # vector storeing the MSE of the different models
+  MSEit <- numeric(2)
+  
+  ################################################################################################
+  # Data Preparations
+  ################################################################################################
+  
+  # features and noise
+  n <- n.sample + n.test
+  S <- genPositiveDefMat("c-vine",dim=d)
+  X <- rmnorm(n,varcov=S$Sigma)
+  
+  noise0 <- rnorm(n,0,1)
+  noise1 <- rnorm(n,0,1)
+  
+  # response functions
+  betaC <- runif(n = 2, min = 5, max = 10)
+  CATE <- betaC[1] * X[,1]^2  + betaC[1] * X[,2] + X[,2] * X[,3] # true CATE
+  beta <- runif(n = d, min = 5, max = 10)
+  mu0 <- X %*% beta # true response function under control
+  mu1 <- mu0 + CATE # true response function under treatment
+  
+  # potential outcomes
+  Y0 <- mu0 + noise0
+  Y1 <- mu1 + noise1
+  
+  # data preparations
+  data <- data.frame(X,Y0,Y1, CATE)
+  index.train <- 1:n.sample
+  data.train <- data[index.train,]
+  data.test <- data[-index.train,]
+  index <- sample(1:n.sample, n.sample*eX)
+  data.contr <- data.train[-index,]
+  data.treat <- data.train[index,]
+  
+  ################################################################################################
+  # X-Learner RF
+  ################################################################################################
+  
+  # estimated response function under control and treatment
+  mu0.hat.RF <- randomForest(data.contr$Y0~., data = data.contr[,1:d])
+  mu1.hat.RF <- randomForest(data.treat$Y1~., data = data.treat[,1:d])
+  
+  # imputed treatment effects
+  mu0X1.pred.RF <- predict(mu0.hat.RF, newdata = data.treat)
+  mu1X0.pred.RF <- predict(mu1.hat.RF, newdata = data.contr)
+  D0.RF <- mu1X0.pred.RF - data.contr$Y0
+  D1.RF <- data.treat$Y1 - mu0X1.pred.RF
+  
+  # CATE estimates
+  tau0.hat.RF <- randomForest(D0.RF~., data = data.contr[,1:d])
+  tau1.hat.RF <- randomForest(D1.RF~., data = data.treat[,1:d])
+  
+  # evaluate CATE on test data
+  tau0.pred.RF <- predict(tau0.hat.RF, newdata = data.test)
+  tau1.pred.RF <- predict(tau1.hat.RF, newdata = data.test)
+  
+  CATE.hat.RF <- eX * tau0.pred.RF + (1-eX) * tau1.pred.RF
+  CATE.true <- data.test$CATE
+  
+  MSEit[1] <- mean((CATE.hat.RF - CATE.true)^2)
+  
+  ################################################################################################
+  # X-Learner RF with Variable Selection
+  ################################################################################################
+  
+  # CATE estimates
+  tau0.hat.RF <- randomForest(D0.RF~., data = data.contr[,1:3])
+  tau1.hat.RF <- randomForest(D1.RF~., data = data.treat[,1:3])
+  
+  # evaluate CATE on test data
+  tau0.pred.RF <- predict(tau0.hat.RF, newdata = data.test)
+  tau1.pred.RF <- predict(tau1.hat.RF, newdata = data.test)
+  
+  CATE.hat.RF <- eX * tau0.pred.RF + (1-eX) * tau1.pred.RF
+  
+  MSEit[2] <- mean((CATE.hat.RF - CATE.true)^2)
+  
+  ################################################################################################
+  # Return the vector of MSE of all models
+  ################################################################################################
+  
+  return(MSEit)
+  
+}
+
+######################################################################################
+# Initialisation
+######################################################################################
+
+library(foreach)
+library(doParallel)
+
+eX <- 0.5 # propensity score
+d <- 20 # number of covariates X_i
+n.test <- 1000 # number of test observations
+n.factor <- 1000 # number of train observations
+n.tausend <- c(3, 4, 5, 6, 7, 8, 9, 10, 15, 20)
+
+meanMSE <- matrix(NA, ncol = length(n.tausend), nrow = 2) # second argument is number of methods
+old <- Sys.time() # get start time
+
+for (i in 1:length(n.tausend)) {
+  
+  registerDoParallel(88) # set number of cores for parallel computation
+  
+  n.sample <- n.factor*n.tausend[i] # number of observations
+  
+  # repeat for certain training size
+  MSE <- foreach(j=1:176, .packages = c("clusterGeneration", "mnormt", "randomForest"), .combine = cbind) %dopar% {
+    testMSE(eX, d, n.sample, n.test)
+  }
+  
+  meanMSE[,i] <- apply(MSE, 1, mean)
+  
+  new <- Sys.time() - old # calculate difference
+  print(i)
+  print(meanMSE[,i])
+  print(new) # print in nice format
+  
+}
+
+# plot results
+par(mfrow=c(1,1))
+plot(n.tausend, meanMSE[1,], type="b", col="red") #RF
+plot(n.tausend, meanMSE[2,], type="b", col="blue") #RF with variable selection
+
+par(mfrow=c(1,1))
+plot(n.tausend, meanMSE[1,], type="b", bty="n",las=1, ann=F, col="red", ylim = c(min(meanMSE),max(meanMSE))) #RF
+lines(n.tausend, meanMSE[2,], type="b", col="blue") #RF with variable selection
+mtext("Test MSE", side=2, line=3, las=3)
+
+par(mfrow=c(1,1))
+plot(n.tausend, meanMSE[1,], type="b", bty="n",las=1, ann=F, col="red", ylim = c(min(meanMSE),max(meanMSE))) #RF
+lines(n.tausend, meanMSE[2,], type="b", col="blue") #RF with variable selection
+mtext("Test MSE", side=2, line=3, las=3)
+mtext("Training Size in 1000", side=1, line=3, las=1)
+
+par(mfrow=c(1,1))
+plot(n.tausend, meanMSE[1,], type="b", bty="n",las=1, ann=F, col="red", xaxt = 'n', ylim = c(min(meanMSE),max(meanMSE))) #RF
+lines(n.tausend, meanMSE[2,], type="b", col="blue") #RF with variable selection
+mtext("Test MSE", side=2, line=3, las=3)
